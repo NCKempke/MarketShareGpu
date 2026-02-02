@@ -10,7 +10,7 @@
 #include <chrono>
 #include <climits> // For CHAR_BIT
 #include <cstddef>
-// #include <execution> for TBB parallel sort. Not used because ARM does not support it.
+#include <execution>
 #include <fstream>
 #include <future>
 #include <iostream>
@@ -152,14 +152,12 @@ std::vector<size_t> sort_indices(const std::vector<T> &arr, bool ascending)
     // Sort indices based on corresponding values in the array
     if (ascending)
     {
-        /* Sequential sort - parallel requires TBB which is not available on ARM. */
-        std::sort(/*std::execution::par_unseq,*/ indices.begin(), indices.end(), [&arr](size_t i1, size_t i2)
+        std::sort(std::execution::par_unseq, indices.begin(), indices.end(), [&arr](size_t i1, size_t i2)
                   { return arr[i1] < arr[i2]; });
     }
     else
     {
-        /* Sequential sort - parallel requires TBB which is not available on ARM. */
-        std::sort(/*std::execution::par_unseq,*/ indices.begin(), indices.end(), [&arr](size_t i1, size_t i2)
+        std::sort(std::execution::par_unseq, indices.begin(), indices.end(), [&arr](size_t i1, size_t i2)
                   { return arr[i1] > arr[i2]; });
     }
 
@@ -275,70 +273,51 @@ void write_four_list_solution_to_file(size_t index_list1, size_t index_list2, si
     sol_file << std::endl;
 }
 
-// Custom hash function to encode the vector as an __int128_t
-__int128_t encode_vector(const size_t *vec, size_t len)
+size_t custom_hash_cpu(size_t x)
 {
-    constexpr size_t base = 10000; // 4 digits per value
-    __int128_t hash_value = 0;
-
-    for (size_t i_vec = 0; i_vec < len; ++i_vec)
-        hash_value = hash_value * base + vec[i_vec];
-
-    return hash_value;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
 }
 
-std::pair<bool, std::pair<size_t, size_t>> evaluate_solutions_cpu_hashing(const MarkShareFeas &ms_inst, const std::vector<size_t> &scores_q1, const std::vector<size_t> &scores_q2, size_t n_q1, size_t n_q2, size_t row_offset)
+template <const bool ENCODE_REQUIRED>
+std::vector<size_t> flatten_and_encode_tuples_cpu(const std::vector<PairsTuple>& tuples, size_t n_tuples, const std::vector<size_t> &scores1, const std::vector<size_t> &scores2, const MarkShareFeas &ms_inst, size_t row_offset)
 {
-    const size_t len_vec = ms_inst.m() - row_offset;
-    std::unordered_map<__int128_t, size_t> hashTable;
-    std::vector<size_t> needed(len_vec);
-    bool done = false;
-    std::pair<size_t, size_t> solution_indices = {n_q1, n_q2};
+    const size_t m_rows_left = ms_inst.m() - row_offset;
+    std::vector<size_t> hashes (n_tuples);
 
-    auto profiler = std::make_unique<ScopedProfiler>("Eval CPU: Hash table setup  ");
-    for (size_t i_q1 = 0; i_q1 < n_q1; ++i_q1)
+#pragma omp parallel for
+    for (size_t i_tuple = 0; i_tuple < tuples.size(); ++i_tuple)
     {
-        for (size_t j = 0; j < len_vec; ++j)
+        auto first = tuples[i_tuple].pairs_first;
+        auto pair_second_beg = tuples[i_tuple].pairs_second_beg;
+        auto pair_second_end = pair_second_beg + tuples[i_tuple].pairs_n_second;
+        auto pair_offset = tuples[i_tuple].pairs_offset;
+
+        for (size_t second = pair_second_beg; second < pair_second_end; ++second)
         {
-            needed[j] = ms_inst.b()[row_offset + j] - scores_q1[i_q1 * len_vec + j];
-        }
+            size_t key = 0;
 
-        __int128_t needed_key = encode_vector(needed.data(), len_vec);
-        hashTable[needed_key] = i_q1;
-    }
+            /* Compute the hash of this tuple. */
+            for (size_t i_row = 0; i_row < m_rows_left; ++i_row) {
+                /* Compute the pair's score of this row and add it (encoded) to key. */
+                size_t row_score = scores1[first * m_rows_left + i_row] + scores2[second * m_rows_left + i_row];
 
-    profiler = std::make_unique<ScopedProfiler>("Eval CPU: Hash table search ");
-#pragma omp parallel shared(done)
-#pragma omp for
-    for (size_t i_q2 = 0; i_q2 < n_q2; ++i_q2)
-    {
-        if (done)
-        {
-#pragma omp cancel for
-        }
+                if (ENCODE_REQUIRED)
+                    row_score = ms_inst.b()[i_row + row_offset] - row_score;
 
-        __int128_t given_key = encode_vector(scores_q2.data() + i_q2 * len_vec, len_vec);
-
-        if (hashTable.find(given_key) != hashTable.end())
-        {
-            /* Found a feasible solution! */
-#pragma omp critical
-            {
-                if (!done)
-                {
-                    const size_t i_q1 = hashTable[given_key];
-                    done = true;
-                    solution_indices = {i_q1, i_q2};
-                }
+                key ^= custom_hash_cpu(row_score) + 0x9e3779b9 + (key << 6) + (key >> 2);
             }
-#pragma omp flush(done)
-#pragma omp cancel for
+
+            hashes[pair_offset] = key;
+            ++pair_offset;
         }
     }
 
-    profiler.reset();
-
-    return {done, solution_indices};
+    return hashes;
 }
 
 void compute_scores_cpu(const MarkShareFeas &ms_inst, std::vector<size_t> &scores, const std::vector<std::vector<size_t>> &subsets, size_t col_offset, size_t row_offset)
@@ -535,16 +514,105 @@ void extract_pairs_from_heap(std::vector<PairsTuple> &pairs_same_score, std::vec
     chunks_beg.push_back(pairs_same_score.size());
 }
 
-std::pair<bool, std::pair<size_t, size_t>> evaluate_cpu(const std::vector<size_t> &set1_scores, const std::vector<size_t> &set2_scores_sorted_asc, const std::vector<size_t> &set3_scores, const std::vector<size_t> &set4_scores_sorted_desc, const std::vector<PairsTuple> &same_score_q1, size_t n_pairs_q1, const std::vector<PairsTuple> &same_score_q2, size_t n_pairs_q2, const MarkShareFeas &ms_inst, size_t reduce_dim)
+std::vector<size_t> find_equal_hashes_cpu(std::vector<size_t>& hashes_required, const std::vector<size_t>& hashes_search, bool sort_required = true)
 {
-    /* Precompute the partial scores. */
-    std::vector<size_t> buffered_scores_q1(ms_inst.m() * n_pairs_q1);
-    std::vector<size_t> buffered_scores_q2(ms_inst.m() * n_pairs_q2);
+    /* The shorter array will be encoded as required and will be sorted. */
+    const size_t n_search = hashes_search.size();
 
-    combine_scores_cpu(set1_scores, set2_scores_sorted_asc, ms_inst.m(), same_score_q1, buffered_scores_q1, reduce_dim);
-    combine_scores_cpu(set3_scores, set4_scores_sorted_desc, ms_inst.m(), same_score_q2, buffered_scores_q2, reduce_dim);
+    /* Compute hashes of required vectors. */
+    auto profiler = std::make_unique<ScopedProfiler>("Eval CPU: sort required     ");
+    if (sort_required)
+    {
+        std::sort(std::execution::par_unseq, hashes_required.begin(), hashes_required.end());
+    }
 
-    return evaluate_solutions_cpu_hashing(ms_inst, buffered_scores_q1, buffered_scores_q2, n_pairs_q1, n_pairs_q2, reduce_dim);
+    profiler = std::make_unique<ScopedProfiler>("Eval CPU: binary search     ");
+
+    std::vector<bool> result(n_search);
+
+    /* Parallel binary search for each hash. */
+#pragma omp parallel for
+    for (size_t i = 0; i < n_search; i++)
+    {
+        result[i] = std::binary_search(hashes_required.begin(), hashes_required.end(), hashes_search[i]);
+    }
+
+    profiler = std::make_unique<ScopedProfiler>("Eval CPU: check results     ");
+
+    std::vector<size_t> hashes;
+    for (size_t i = 0; i < n_search; i++)
+    {
+        if (result[i])
+        {
+            hashes.push_back(hashes_search[i]);
+        }
+    }
+
+    profiler.reset();
+    return hashes;
+}
+
+std::vector<std::pair<size_t, size_t>> find_hash_positions_cpu(const std::vector<size_t>& hashes_required,
+                                                                const std::vector<size_t>& hashes_search,
+                                                                const std::vector<size_t>& matching_hashes,
+                                                                bool encode_first_as_required)
+{
+    encode_first_as_required = encode_first_as_required || (hashes_required.size() < hashes_search.size());
+
+    std::vector<std::pair<size_t, size_t>> solution_candidates;
+    solution_candidates.reserve(matching_hashes.size());
+
+    for (const auto hash : matching_hashes)
+    {
+        // Find position in required vector
+        auto iter_req = std::find(hashes_required.begin(), hashes_required.end(), hash);
+        // Find position in search vector
+        auto iter_search = std::find(hashes_search.begin(), hashes_search.end(), hash);
+
+        // Assertions (could be removed or replaced with error handling)
+        assert(iter_req != hashes_required.end());
+        assert(iter_search != hashes_search.end());
+
+        auto pos_req = std::distance(hashes_required.begin(), iter_req);
+        auto pos_search = std::distance(hashes_search.begin(), iter_search);
+
+        if (encode_first_as_required)
+            solution_candidates.emplace_back(pos_req, pos_search);
+        else
+            solution_candidates.emplace_back(pos_search, pos_req);
+    }
+
+    return solution_candidates;
+}
+
+std::pair<bool, std::pair<size_t, size_t>> evaluate_cpu(const std::vector<size_t> &set1_scores, const std::vector<size_t> &set2_scores_sorted_asc, const std::vector<size_t> &set3_scores, const std::vector<size_t> &set4_scores_sorted_desc, const std::vector<PairsTuple> &same_score_q1, size_t n_pairs_q1, const std::vector<PairsTuple> &same_score_q2, size_t n_pairs_q2, const MarkShareFeas &ms_inst, size_t reduce_dim, const std::vector<std::vector<size_t>> &set1_subsets, const std::vector<std::vector<size_t>> &set2_subsets_sorted_asc, const std::vector<std::vector<size_t>> &set3_subsets, const std::vector<std::vector<size_t>> &set4_subsets_sorted_desc,
+                                                                         const std::vector<size_t> &subset_sum_1d, const std::vector<size_t> &offsets)
+{
+    /* Encode the 2 sets as 'required'. */
+    auto profiler = std::make_unique<ScopedProfiler>("Eval CPU: combine + encode  ");
+    auto required = flatten_and_encode_tuples_cpu<true>(same_score_q1, n_pairs_q1, set1_scores, set2_scores_sorted_asc, ms_inst, reduce_dim);
+    const auto search = flatten_and_encode_tuples_cpu<false>(same_score_q2, n_pairs_q2, set3_scores, set4_scores_sorted_desc, ms_inst, reduce_dim);
+    profiler.reset();
+
+    auto hashes = find_equal_hashes_cpu(required, search);
+
+    if (!hashes.empty())
+    {
+        required = flatten_and_encode_tuples_cpu<true>(same_score_q1, n_pairs_q1, set1_scores, set2_scores_sorted_asc, ms_inst, reduce_dim);
+        const std::vector<std::pair<size_t, size_t>> candidates = find_hash_positions_cpu(required, search, hashes, true);
+
+        /* Check all potential solutions. */
+        for (const auto &solution_cand : candidates)
+        {
+            /* Offset each solution candidate by its chunk. */
+            const auto feasible = verify_solution(solution_cand, same_score_q1.data(), n_pairs_q1, same_score_q2.data(), n_pairs_q2, set1_subsets, set2_subsets_sorted_asc, set3_subsets, set4_subsets_sorted_desc, subset_sum_1d, offsets, ms_inst);
+
+            if (feasible)
+                return {true, solution_cand};
+        }
+    }
+
+    return {false, {0, 0}};
 }
 
 #ifdef WITH_GPU
@@ -698,7 +766,7 @@ EvalResult evaluate_gpu_or_cpu(PipelineBuffer &buf,
         assert(n_q2_chunks == 1);
         auto profiler_evaluate = std::make_unique<ScopedProfiler>("Evaluate solutions CPU      ");
 
-        auto [done, solution_indices] = evaluate_cpu(set1_scores, set2_scores_sorted_asc, set3_scores, set4_scores_sorted_desc, buf.same_score_q1, buf.n_pairs_q1, buf.same_score_q2, buf.n_pairs_q2, ms_inst, reduce_dim);
+        auto [done, solution_indices] = evaluate_cpu(set1_scores, set2_scores_sorted_asc, set3_scores, set4_scores_sorted_desc, buf.same_score_q1, buf.n_pairs_q1, buf.same_score_q2, buf.n_pairs_q2, ms_inst, reduce_dim, set1_subsets, set2_subsets_sorted_asc, set3_subsets, set4_subsets_sorted_desc, subset_sum_1d, offsets);
 
         res.found = done;
         res.solution = solution_indices;
