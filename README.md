@@ -1,4 +1,4 @@
-# A GPU accelerated variant of Schroeppel-Shamir’s algorithm for solving the market split problem
+# A CPU-GPU-Hybrid Variant of Schroeppel-Shamir’s Algorithm for Solving the Market Split Problem
 
 The feasibility version of the market split problem (fMSP) as given in [[1]](#1) is equivalent to the n-dimensional subset sum problem: Find a vector $`x_j \in \{0,1\}^n`$ such that
 ```math
