@@ -32,6 +32,9 @@ size_t max_pairs_per_chunk = 3500000000;
 
 typedef std::chrono::high_resolution_clock::time_point TimeVar;
 
+static int n_found_global = 0;
+static bool find_all = false;
+
 #define duration(a) std::chrono::duration_cast<std::chrono::nanoseconds>(a).count()
 #define timeNow() std::chrono::high_resolution_clock::now()
 
@@ -607,8 +610,10 @@ std::pair<bool, std::pair<size_t, size_t>> evaluate_cpu(const std::vector<size_t
             /* Offset each solution candidate by its chunk. */
             const auto feasible = verify_solution(solution_cand, same_score_q1.data(), n_pairs_q1, same_score_q2.data(), n_pairs_q2, set1_subsets, set2_subsets_sorted_asc, set3_subsets, set4_subsets_sorted_desc, subset_sum_1d, offsets, ms_inst);
 
-            if (feasible)
+            if (feasible && !find_all)
                 return {true, solution_cand};
+            else
+                ++n_found_global;
         }
     }
 
@@ -672,8 +677,10 @@ std::tuple<bool, size_t, size_t, std::pair<size_t, size_t>> evaluate_gpu(GpuData
                     /* Offset each solution candidate by its chunk. */
                     const auto feasible = verify_solution(solution_cand, q1_chunk, n_tuples_q1_chunk, q2_chunk, n_tuples_q2_chunk, set1_subsets, set2_subsets_sorted_asc, set3_subsets, set4_subsets_sorted_desc, subset_sum_1d, offsets, ms_inst);
 
-                    if (feasible)
+                    if (feasible && !find_all)
                         return {true, i_q1_chunk, i_q2_chunk, solution_cand};
+                    else
+                        ++n_found_global;
                 }
             }
 
@@ -1028,7 +1035,7 @@ bool shroeppel_shamir_dim_reduced(const MarkShareFeas &ms_inst, bool run_on_gpu,
                 assert(buf_next.state == EVALUATED);
 
                 /* Check the result - break if we are done. */
-                if (result.found)
+                if (result.found && !find_all)
                 {
                     return print_and_verify_solution(buf_next, result, ms_inst, subset_sum_1d, offsets, asc_indices_set2_weights, desc_indices_set4_weights, set1_subsets, set2_subsets_sorted_asc, set3_subsets, set4_subsets_sorted_desc, list1, list2, list3, list4, instance_name
 #ifndef NDEBUG
@@ -1101,7 +1108,10 @@ bool shroeppel_shamir_dim_reduced(const MarkShareFeas &ms_inst, bool run_on_gpu,
 
     profiler.reset();
 
-    return false;
+    if (find_all)
+        printf("Found a total of %d solutions.\n", n_found_global);
+
+    return n_found_global > 0;
 }
 
 std::string get_filename_without_extension(const std::string &filePath)
@@ -1160,6 +1170,11 @@ int main(int argc, char *argv[])
 
     program.add_argument("--gpu")
         .help("Run validation on GPU")
+        .flag();
+
+    program.add_argument("--find_all")
+        .store_into(find_all)
+        .help("Set this to find all solutions")
         .flag();
 
     program.add_argument("-f", "--file")
