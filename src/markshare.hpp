@@ -71,6 +71,23 @@ public:
     /* Generates a market share feasibility instance with n = 10 * (m - 1). */
     MarkShareFeas(size_t m, size_t seed = 0) : MarkShareFeas(m, 10 * (m - 1), seed) {};
 
+    static void skip_comments_and_empty_lines(std::istream& in)
+    {
+        while (true)
+        {
+            in >> std::ws; // skip whitespace, including empty lines
+
+            if (in.peek() == '#')
+            {
+                std::string ignored;
+                std::getline(in, ignored); // consume the full comment line
+                continue;
+            }
+
+            break;
+        }
+    }
+
     /* Read a MarkShareInstance from file. The format supported is
      * +++++++++++++++++++++++++++++++++++++++
      * m n
@@ -81,6 +98,8 @@ public:
      *  .               .  .
      * am1 am2 am3     amn bm
      * +++++++++++++++++++++++++++++++++++++++
+     *
+     * Lines starting with '#' are treated as comments.
      */
     MarkShareFeas(const std::string instance_path)
     {
@@ -91,6 +110,7 @@ public:
         }
 
         /* Read the first line to get m and n. */
+        skip_comments_and_empty_lines(file);
         file >> m_rows >> n_cols;
 
         matrix.reserve(m_rows * n_cols);
@@ -99,6 +119,8 @@ public:
         /* Read the matrix rows and right hand side. */
         for (size_t i_row = 0; i_row < m_rows; ++i_row)
         {
+            skip_comments_and_empty_lines(file);
+
             for (size_t j_col = 0; j_col < n_cols; ++j_col)
             {
                 size_t value;
