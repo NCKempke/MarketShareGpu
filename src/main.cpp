@@ -612,7 +612,7 @@ std::pair<bool, std::pair<size_t, size_t>> evaluate_cpu(const std::vector<size_t
 
             if (feasible && !find_all)
                 return {true, solution_cand};
-            else
+            else if (feasible)
                 ++n_found_global;
         }
     }
@@ -679,7 +679,7 @@ std::tuple<bool, size_t, size_t, std::pair<size_t, size_t>> evaluate_gpu(GpuData
 
                     if (feasible && !find_all)
                         return {true, i_q1_chunk, i_q2_chunk, solution_cand};
-                    else
+                    else if (feasible)
                         ++n_found_global;
                 }
             }
